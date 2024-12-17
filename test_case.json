@@ -1,0 +1,50 @@
+{
+    "case_id": "SEC-2024-001",
+    "details": {
+        "id": "SEC-2024-001",
+        "status": "open",
+        "severity": "critical",
+        "created_at": "2024-12-16T16:30:17-07:00",
+        "last_updated": "2024-12-16T16:30:17-07:00"
+    },
+    "summary": {
+        "id": "SEC-2024-001",
+        "title": "Potential Data Exfiltration Attempt",
+        "description": "Multiple failed authentication attempts followed by successful login and unusual data transfer patterns detected from internal database to external IP"
+    },
+    "alerts": [
+        {
+            "id": "ALERT-001",
+            "case_id": "SEC-2024-001",
+            "type": "authentication_failure",
+            "severity": "medium",
+            "timestamp": "2024-12-16T16:25:17-07:00",
+            "details": "10 failed login attempts from IP 192.168.1.100"
+        },
+        {
+            "id": "ALERT-002",
+            "case_id": "SEC-2024-001", 
+            "type": "successful_auth",
+            "severity": "low",
+            "timestamp": "2024-12-16T16:27:17-07:00",
+            "details": "Successful login from IP 192.168.1.100"
+        },
+        {
+            "id": "ALERT-003",
+            "case_id": "SEC-2024-001",
+            "type": "data_exfiltration",
+            "severity": "critical",
+            "timestamp": "2024-12-16T16:29:17-07:00",
+            "details": "Unusual outbound data transfer of 500MB to IP 203.0.113.100"
+        }
+    ],
+    "activities": [
+        {
+            "id": "ACT-001",
+            "case_id": "SEC-2024-001",
+            "type": "system_audit",
+            "timestamp": "2024-12-16T16:29:30-07:00",
+            "details": "System audit initiated for affected database server"
+        }
+    ]
+}

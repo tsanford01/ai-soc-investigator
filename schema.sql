@@ -118,6 +118,23 @@ CREATE TABLE IF NOT EXISTS stuck_workflow_analysis (
     timestamp TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT NOW()
 );
 
+-- Decision Metrics table
+CREATE TABLE IF NOT EXISTS decision_metrics (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    case_id TEXT NOT NULL,
+    case_uuid UUID NOT NULL,
+    needs_investigation BOOLEAN NOT NULL,
+    priority INTEGER NOT NULL,
+    automated_actions JSONB NOT NULL,
+    required_human_actions JSONB NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now()),
+    updated_at TIMESTAMP WITH TIME ZONE DEFAULT timezone('utc'::text, now())
+);
+
+-- Create indexes for decision_metrics
+CREATE INDEX IF NOT EXISTS decision_metrics_case_id_idx ON decision_metrics(case_id);
+CREATE INDEX IF NOT EXISTS decision_metrics_case_uuid_idx ON decision_metrics(case_uuid);
+
 -- Create indexes
 CREATE INDEX IF NOT EXISTS workflows_status_idx ON workflows(status);
 CREATE INDEX IF NOT EXISTS workflows_current_stage_idx ON workflows(current_stage);
