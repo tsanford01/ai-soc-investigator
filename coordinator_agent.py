@@ -3,11 +3,12 @@ import uuid
 import logging
 import asyncio
 from datetime import datetime
-from typing import Dict, Any, List, Optional, Callable, Union, TypedDict
+from typing import Dict, Any, List, Optional, Callable, Union, TypedDict, NoReturn
 from supabase_client import SupabaseWrapper
 from api_client import APIClient
-from ai_agent import AIAgent
+from ai_agent import AIAgent, CaseAnalysis
 from slack_notifier import SlackNotifier
+from pydantic import BaseModel, Field
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +21,16 @@ class AgentMetrics(TypedDict):
     failure: int
     avg_time: float
 
+class StageConfig(BaseModel):
+    """Configuration for a workflow stage."""
+    name: str
+    timeout: float = Field(default=300.0, gt=0.0)  # timeout in seconds
+    max_retries: int = Field(default=3, ge=0)
+    backoff_factor: float = Field(default=1.5, gt=1.0)
+
 class CoordinatorAgent:
+    """Agent responsible for coordinating the case investigation workflow."""
+
     def __init__(self, api_client: APIClient, supabase_client: SupabaseWrapper, ai_agent: AIAgent):
         """Initialize the CoordinatorAgent with required components and configuration.
         
@@ -47,24 +57,25 @@ class CoordinatorAgent:
         # Initialize workflow stages tracking
         self.workflow_stages: Dict[str, WorkflowStage] = {}
         
+        # Initialize stage configurations
+        self.stage_configs: Dict[str, StageConfig] = {
+            'alert_ingestion': StageConfig(name='alert_ingestion', timeout=60.0),
+            'triage': StageConfig(name='triage', timeout=120.0),
+            'investigation': StageConfig(name='investigation', timeout=300.0),
+            'containment': StageConfig(name='containment', timeout=180.0),
+            'review': StageConfig(name='review', timeout=120.0),
+            'soc_optimization': StageConfig(name='soc_optimization', timeout=300.0)
+        }
+        
         # Initialize performance metrics
         self.metrics: Dict[str, AgentMetrics] = {
-            'alert_ingestion': {'success': 0, 'failure': 0, 'avg_time': 0},
-            'triage': {'success': 0, 'failure': 0, 'avg_time': 0},
-            'investigation': {'success': 0, 'failure': 0, 'avg_time': 0},
-            'containment': {'success': 0, 'failure': 0, 'avg_time': 0},
-            'review': {'success': 0, 'failure': 0, 'avg_time': 0},
-            'soc_optimization': {'success': 0, 'failure': 0, 'avg_time': 0}
+            stage: {'success': 0, 'failure': 0, 'avg_time': 0}
+            for stage in self.stage_configs.keys()
         }
         
         # Initialize agent status tracking
         self.agent_status: Dict[str, str] = {
-            'alert_ingestion': 'ready',
-            'triage': 'ready',
-            'investigation': 'ready',
-            'containment': 'ready',
-            'review': 'ready',
-            'soc_optimization': 'ready'
+            stage: 'ready' for stage in self.stage_configs.keys()
         }
         
         # Load and validate optimization thresholds
@@ -84,495 +95,276 @@ class CoordinatorAgent:
             }
         
         # Error tracking
-        self.error_counts = {agent: 0 for agent in self.agent_status.keys()}
+        self.error_counts = {stage: 0 for stage in self.stage_configs.keys()}
         
-    async def start_workflow(self, alert_data: Dict[str, Any]) -> str:
-        """Start the incident response workflow with a new alert.
+        # Async primitives
+        self._shutdown_event = asyncio.Event()
+        self._case_queue: asyncio.Queue[Dict[str, Any]] = asyncio.Queue()
+        self._tasks: List[asyncio.Task] = []
+
+    async def start(self) -> None:
+        """Start the coordinator agent and its worker tasks."""
+        logger.info("Starting Coordinator Agent...")
         
-        Args:
-            alert_data: Dictionary containing alert information
-            
-        Returns:
-            str: Workflow ID
-            
-        Raises:
-            ValueError: If alert_data is invalid
-            RuntimeError: If workflow creation fails
-        """
-        if not alert_data:
-            raise ValueError("Alert data is required")
-        if 'id' not in alert_data:
-            raise ValueError("Alert must have an ID")
-            
-        workflow_id = str(uuid.uuid4())
-        start_time = datetime.now()
+        # Create worker tasks
+        self._tasks = [
+            asyncio.create_task(self._process_cases()),
+            asyncio.create_task(self._monitor_metrics()),
+            asyncio.create_task(self._cleanup_stale_stages())
+        ]
         
         try:
-            # Initialize workflow stage tracking
-            self.workflow_stages[workflow_id] = {
-                'start_time': start_time,
-                'status': 'started'
-            }
-            
-            # Create workflow record
-            await self.supabase.create_workflow({
-                'id': workflow_id,
-                'status': 'started',
-                'alert_id': alert_data['id'],
-                'start_time': start_time,
-                'current_stage': 'alert_ingestion'
-            })
-            
-            logger.info(f"Started new workflow {workflow_id} for alert {alert_data['id']}")
-            
-            # Start async monitoring of the workflow
-            monitor_task = asyncio.create_task(self._monitor_workflow(workflow_id))
-            monitor_task.add_done_callback(
-                lambda t: logger.error(f"Workflow monitor failed: {t.exception()}") if t.exception() else None
-            )
-            
-            return workflow_id
-            
-        except Exception as e:
-            logger.error(f"Error starting workflow: {str(e)}")
-            if workflow_id in self.workflow_stages:
-                del self.workflow_stages[workflow_id]
-            await self._handle_workflow_error(workflow_id, str(e))
-            raise RuntimeError(f"Failed to start workflow: {str(e)}")
-    
-    async def _monitor_workflow(self, workflow_id: str) -> None:
-        """Monitor the progress of a workflow.
+            # Wait for shutdown signal
+            await self._shutdown_event.wait()
+        finally:
+            await self.shutdown()
+
+    async def shutdown(self) -> None:
+        """Gracefully shut down the coordinator agent."""
+        logger.info("Shutting down Coordinator Agent...")
         
-        Args:
-            workflow_id: ID of the workflow to monitor
-            
-        Raises:
-            RuntimeError: If workflow monitoring fails repeatedly
-        """
-        consecutive_errors = 0
-        max_consecutive_errors = 3
+        # Cancel all tasks
+        for task in self._tasks:
+            task.cancel()
         
+        # Wait for tasks to complete
+        await asyncio.gather(*self._tasks, return_exceptions=True)
+        
+        # Close clients
+        await self.api_client.close()
+        await self.supabase.close()
+        
+        logger.info("Coordinator Agent shutdown complete")
+
+    async def _process_cases(self) -> None:
+        """Process cases from the queue."""
         while True:
             try:
-                workflow = await self.supabase.get_workflow(workflow_id)
-                if not workflow:
-                    logger.error(f"Workflow {workflow_id} not found")
-                    break
-                    
-                if workflow['status'] in ['completed', 'failed']:
-                    logger.info(f"Workflow {workflow_id} finished with status: {workflow['status']}")
-                    if workflow_id in self.workflow_stages:
-                        del self.workflow_stages[workflow_id]
-                    break
-                    
-                # Check for stuck workflows
-                current_time = datetime.now()
-                stage_start_time = workflow.get('stage_start_time', current_time)
-                if isinstance(stage_start_time, str):
-                    stage_start_time = datetime.fromisoformat(stage_start_time.replace('Z', '+00:00'))
-                
-                time_in_stage = (current_time - stage_start_time).total_seconds()
-                if time_in_stage > self.thresholds['execution_time']:
-                    await self._handle_stuck_workflow(workflow_id, workflow['current_stage'])
-                
-                consecutive_errors = 0  # Reset error count on successful check
-                await asyncio.sleep(10)  # Check every 10 seconds
-                
+                case = await self._case_queue.get()
+                await self._process_single_case(case)
+                self._case_queue.task_done()
+            except asyncio.CancelledError:
+                break
             except Exception as e:
-                consecutive_errors += 1
-                logger.error(f"Error monitoring workflow {workflow_id}: {str(e)}")
-                
-                if consecutive_errors >= max_consecutive_errors:
-                    logger.critical(f"Monitoring failed {max_consecutive_errors} times for workflow {workflow_id}")
-                    await self._handle_workflow_error(
-                        workflow_id, 
-                        f"Monitoring failed after {max_consecutive_errors} attempts: {str(e)}"
-                    )
-                    break
-                
-                # Exponential backoff
-                await asyncio.sleep(min(30 * (2 ** (consecutive_errors - 1)), 300))
-    
-    async def _execute_stage(self, stage_name: str, stage_func: Callable[..., Any], *args) -> Any:
-        """Execute a workflow stage and track its performance.
+                logger.error(f"Error processing case: {str(e)}")
+                await asyncio.sleep(5)  # Brief delay before retrying
+
+    async def _process_single_case(self, case: Dict[str, Any]) -> None:
+        """Process a single case through all stages.
         
         Args:
-            stage_name: Name of the stage to execute
-            stage_func: Function to execute for this stage
-            *args: Arguments to pass to the stage function
-            
-        Returns:
-            Any: Result from the stage function
+            case: Case data to process
             
         Raises:
-            ValueError: If stage_name is invalid
-            RuntimeError: If stage execution fails
+            RuntimeError: If case processing fails
         """
-        if stage_name not in self.agent_status:
-            raise ValueError(f"Invalid stage name: {stage_name}")
-            
-        if not callable(stage_func):
-            raise ValueError("stage_func must be callable")
-            
+        case_id = case.get('external_id', 'unknown')
+        logger.info(f"Processing case {case_id}")
+        
         try:
-            # Update agent status
-            self.agent_status[stage_name] = 'working'
-            start_time = datetime.now()
+            # Execute stages in sequence
+            stages = ['alert_ingestion', 'triage', 'investigation', 'containment', 'review']
+            for stage in stages:
+                config = self.stage_configs[stage]
+                
+                # Execute stage with timeout and retries
+                for attempt in range(config.max_retries + 1):
+                    try:
+                        async with asyncio.timeout(config.timeout):
+                            await self._execute_stage(stage, self._get_stage_handler(stage), case)
+                        break  # Stage completed successfully
+                    except asyncio.TimeoutError:
+                        logger.warning(f"Stage {stage} timed out for case {case_id}")
+                        if attempt == config.max_retries:
+                            raise
+                        await asyncio.sleep(config.backoff_factor ** attempt)
+                    except Exception as e:
+                        logger.error(f"Stage {stage} failed for case {case_id}: {str(e)}")
+                        if attempt == config.max_retries:
+                            raise
+                        await asyncio.sleep(config.backoff_factor ** attempt)
             
-            # Execute stage
-            result = await stage_func(*args)
-            
-            # Update metrics
-            execution_time = (datetime.now() - start_time).total_seconds()
-            await self._update_metrics(stage_name, 'success', execution_time)
-            
-            # Reset error count on success
-            self.error_counts[stage_name] = 0
-            self.agent_status[stage_name] = 'ready'
-            
-            return result
+            logger.info(f"Successfully processed case {case_id}")
             
         except Exception as e:
-            error_msg = f"Stage {stage_name} failed: {str(e)}"
-            logger.error(error_msg)
-            
-            await self._update_metrics(stage_name, 'failure', 0)
-            self.agent_status[stage_name] = 'error'
-            self.error_counts[stage_name] += 1
-            
-            if self.error_counts[stage_name] >= self.thresholds['error_threshold']:
-                await self._handle_agent_failure(stage_name, str(e))
-            
-            raise RuntimeError(error_msg) from e
-    
-    async def _update_metrics(self, stage_name: str, outcome: str, execution_time: float) -> None:
-        """Update performance metrics for an agent.
+            logger.error(f"Failed to process case {case_id}: {str(e)}")
+            await self._handle_case_failure(case, str(e))
+            raise RuntimeError(f"Case processing failed: {str(e)}") from e
+
+    def _get_stage_handler(self, stage: str) -> Callable:
+        """Get the handler function for a stage.
         
         Args:
-            stage_name: Name of the stage to update metrics for
-            outcome: Either 'success' or 'failure'
-            execution_time: Time taken to execute the stage in seconds
+            stage: Stage name
+            
+        Returns:
+            Callable: Stage handler function
             
         Raises:
-            ValueError: If stage_name or outcome is invalid
+            ValueError: If stage is invalid
         """
-        if stage_name not in self.metrics:
-            raise ValueError(f"Invalid stage name: {stage_name}")
-        if outcome not in ['success', 'failure']:
-            raise ValueError(f"Invalid outcome: {outcome}")
-            
-        metrics = self.metrics[stage_name]
+        handlers = {
+            'alert_ingestion': self._handle_alert_ingestion,
+            'triage': self._handle_triage,
+            'investigation': self._handle_investigation,
+            'containment': self._handle_containment,
+            'review': self._handle_review
+        }
         
-        try:
-            if outcome == 'success':
-                metrics['success'] += 1
-                # Update running average of execution time
-                total_executions = metrics['success']
-                metrics['avg_time'] = (metrics['avg_time'] * (total_executions - 1) + execution_time) / total_executions
-            else:
-                metrics['failure'] += 1
-            
-            # Store metrics in Supabase
-            await self.supabase.update_agent_metrics(stage_name, {
-                'success_count': metrics['success'],
-                'failure_count': metrics['failure'],
-                'avg_execution_time': metrics['avg_time'],
-                'last_updated': datetime.now()
-            })
-            
-        except Exception as e:
-            logger.error(f"Failed to update metrics for {stage_name}: {str(e)}")
-            # Don't raise the exception as metrics updates should not break the workflow
-    
-    async def get_agent_performance(self) -> Dict[str, Dict[str, Union[float, int, str]]]:
-        """Get performance metrics for all agents.
-        
-        Returns:
-            Dict containing performance metrics for each agent
-        """
-        try:
-            return {
-                agent: {
-                    'success_rate': metrics['success'] / (metrics['success'] + metrics['failure']) 
-                        if metrics['success'] + metrics['failure'] > 0 else 0,
-                    'avg_execution_time': metrics['avg_time'],
-                    'total_executions': metrics['success'] + metrics['failure'],
-                    'current_status': self.agent_status[agent]
-                }
-                for agent, metrics in self.metrics.items()
-            }
-        except Exception as e:
-            logger.error(f"Error getting agent performance: {str(e)}")
-            return {}
-    
-    async def optimize_workflow(self) -> Dict[str, Any]:
-        """Analyze and optimize the workflow based on performance metrics.
-        
-        Returns:
-            Dict containing optimization recommendations and bottleneck information
-            
-        Raises:
-            RuntimeError: If optimization analysis fails
-        """
-        try:
-            performance = await self.get_agent_performance()
-            if not performance:
-                return {'status': 'error', 'message': 'No performance data available'}
-            
-            # Identify bottlenecks
-            bottlenecks = [
-                agent for agent, metrics in performance.items()
-                if metrics['avg_execution_time'] > self.thresholds['execution_time']
-                or metrics['success_rate'] < self.thresholds['success_rate']
-            ]
-            
-            # Convert performance metrics to the format expected by AI agent
-            metrics = {
-                'total_workflows': sum(m['total_executions'] for m in performance.values()),
-                'success_rate': sum(m['success_rate'] for m in performance.values()) / len(performance),
-                'average_completion_time': sum(m['avg_execution_time'] for m in performance.values()),
-                'stage_metrics': {
-                    agent: {
-                        'avg_time': m['avg_execution_time'],
-                        'success_rate': m['success_rate'] * 100  # Convert to percentage
-                    }
-                    for agent, m in performance.items()
-                }
-            }
-            
-            # Get optimization recommendations from AI
-            recommendations = await self.ai_agent.get_optimization_recommendations(metrics)
-            
-            if recommendations.get('bottlenecks'):
-                # Store recommendations
-                await self.supabase.store_optimization_recommendations({
-                    'timestamp': datetime.now(),
-                    'bottlenecks': recommendations['bottlenecks'],
-                    'recommendations': recommendations['recommendations'],
-                    'performance_metrics': performance
-                })
+        handler = handlers.get(stage)
+        if not handler:
+            raise ValueError(f"Invalid stage: {stage}")
+        return handler
+
+    async def _monitor_metrics(self) -> None:
+        """Monitor and analyze agent performance metrics."""
+        while True:
+            try:
+                await self._analyze_performance()
+                await asyncio.sleep(300)  # Check every 5 minutes
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error monitoring metrics: {str(e)}")
+                await asyncio.sleep(60)  # Brief delay before retrying
+
+    async def _cleanup_stale_stages(self) -> None:
+        """Clean up stale workflow stages."""
+        while True:
+            try:
+                now = datetime.now()
+                stale_stages = []
                 
-                # Notify about optimization recommendations
-                await self._notify_optimization_recommendations(
-                    recommendations['bottlenecks'],
-                    recommendations
-                )
+                for stage_id, stage in self.workflow_stages.items():
+                    if (now - stage['start_time']).total_seconds() > 3600:  # 1 hour timeout
+                        stale_stages.append(stage_id)
                 
-                return recommendations
-            
-            return {'status': 'optimal', 'message': 'No bottlenecks detected'}
-            
-        except Exception as e:
-            error_msg = f"Failed to optimize workflow: {str(e)}"
-            logger.error(error_msg)
-            raise RuntimeError(error_msg) from e
-    
-    async def _handle_agent_failure(self, agent_name: str, error: str) -> None:
-        """Handle agent failures and implement recovery strategies.
+                for stage_id in stale_stages:
+                    await self._handle_stage_timeout(stage_id)
+                    del self.workflow_stages[stage_id]
+                
+                await asyncio.sleep(300)  # Check every 5 minutes
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Error cleaning up stages: {str(e)}")
+                await asyncio.sleep(60)  # Brief delay before retrying
+
+    async def _handle_stage_timeout(self, stage_id: str) -> None:
+        """Handle a stage timeout.
         
         Args:
-            agent_name: Name of the failed agent
-            error: Error message
+            stage_id: ID of the timed out stage
         """
-        logger.error(f"Agent failure: {agent_name} - {error}")
-        
         try:
-            # Store error in Supabase
-            await self.supabase.store_agent_error({
-                'agent': agent_name,
-                'error': str(error),
-                'timestamp': datetime.now(),
-                'error_count': self.error_counts[agent_name]
-            })
-            
-            # Get recovery strategy from AI
-            recovery_strategy = await self.ai_agent.get_recovery_strategy(
-                agent_name=agent_name,
-                error=error,
-                error_count=self.error_counts[agent_name]
-            )
-            
-            # Notify about agent failure
-            await self._notify_agent_failure(agent_name, error, recovery_strategy)
-            
-        except Exception as e:
-            logger.error(f"Error handling agent failure for {agent_name}: {str(e)}")
-            # We don't raise here as this is already an error handler
-    
-    async def _handle_stuck_workflow(self, workflow_id: str, current_stage: str) -> None:
-        """Handle workflows that are stuck in a particular stage.
-        
-        Args:
-            workflow_id: ID of the stuck workflow
-            current_stage: Current stage where the workflow is stuck
-        """
-        logger.warning(f"Workflow {workflow_id} stuck in stage {current_stage}")
-        
-        try:
-            if workflow_id not in self.workflow_stages:
-                logger.error(f"No stage information found for workflow {workflow_id}")
+            stage = self.workflow_stages.get(stage_id)
+            if not stage:
                 return
                 
-            # Get analysis from AI
-            analysis = await self.ai_agent.analyze_stuck_workflow(
-                workflow_id=workflow_id,
-                current_stage=current_stage,
-                time_in_stage=(datetime.now() - self.workflow_stages[workflow_id]['start_time']).total_seconds()
+            logger.warning(f"Stage {stage_id} timed out")
+            
+            # Update metrics
+            stage_name = stage.get('name', 'unknown')
+            if stage_name in self.metrics:
+                self.metrics[stage_name]['failure'] += 1
+            
+            # Notify about timeout
+            await self.slack_notifier.send_alert(
+                f"Stage {stage_id} ({stage_name}) timed out after 1 hour",
+                severity="warning"
             )
             
-            # Store analysis
-            await self.supabase.store_stuck_workflow_analysis({
-                'workflow_id': workflow_id,
-                'stage': current_stage,
-                'analysis': analysis,
-                'timestamp': datetime.now()
-            })
-            
-            # Notify about stuck workflow
-            await self._notify_stuck_workflow(workflow_id, current_stage, analysis)
-            
         except Exception as e:
-            logger.error(f"Error handling stuck workflow {workflow_id}: {str(e)}")
-            await self._handle_workflow_error(workflow_id, f"Failed to handle stuck workflow: {str(e)}")
-    
-    async def _handle_workflow_error(self, workflow_id: str, error_message: str) -> None:
-        """Handle workflow errors by updating the workflow status and logging the error.
+            logger.error(f"Error handling stage timeout: {str(e)}")
+
+    async def _analyze_performance(self) -> None:
+        """Analyze agent performance and optimize if needed."""
+        try:
+            # Calculate success rates and average times
+            for stage, metrics in self.metrics.items():
+                total = metrics['success'] + metrics['failure']
+                if total > 0:
+                    success_rate = metrics['success'] / total
+                    if success_rate < self.thresholds['success_rate']:
+                        await self._optimize_stage(stage)
+                        
+                    if metrics['avg_time'] > self.thresholds['execution_time']:
+                        await self._optimize_stage(stage, focus='performance')
+                        
+        except Exception as e:
+            logger.error(f"Error analyzing performance: {str(e)}")
+
+    async def _optimize_stage(self, stage: str, focus: str = 'reliability') -> None:
+        """Optimize a workflow stage.
         
         Args:
-            workflow_id: ID of the failed workflow
-            error_message: Error message to log
+            stage: Stage to optimize
+            focus: Optimization focus ('reliability' or 'performance')
         """
         try:
-            await self.supabase.update_workflow(workflow_id, {
-                'status': 'error',
-                'error_message': error_message,
-                'updated_at': datetime.now()
+            logger.info(f"Optimizing stage {stage} for {focus}")
+            
+            # Get stage metrics
+            metrics = self.metrics[stage]
+            
+            # Get optimization recommendations
+            recommendations = await self.ai_agent.get_optimization_recommendations({
+                'stage': stage,
+                'focus': focus,
+                'metrics': metrics
             })
             
-            await self.supabase.create_error_log({
-                'workflow_id': workflow_id,
-                'error_message': error_message,
-                'timestamp': datetime.now()
-            })
+            # Apply recommendations
+            config = self.stage_configs[stage]
+            if focus == 'reliability':
+                config.max_retries += 1
+                config.backoff_factor *= 1.2
+            else:  # performance
+                config.timeout *= 0.8
             
-            logger.error(f"Workflow {workflow_id} failed: {error_message}")
+            # Log optimization
+            logger.info(f"Applied optimization to {stage}: {recommendations}")
             
-            # Clean up workflow stages
-            if workflow_id in self.workflow_stages:
-                del self.workflow_stages[workflow_id]
-            
-            # Notify about the error via Slack
+            # Notify about optimization
             await self.slack_notifier.send_message(
-                f"🚨 Error in workflow {workflow_id}: {error_message}"
+                f"Optimized {stage} stage for {focus}. New configuration: {config}"
             )
             
         except Exception as e:
-            # At this point, we can only log the error as this is our last resort error handler
-            logger.critical(f"Critical error while handling workflow error: {str(e)}")
-    
-    async def _notify_optimization_recommendations(
-        self, 
-        bottlenecks: List[str], 
-        recommendations: Dict[str, Any]
-    ) -> None:
-        """Notify about optimization recommendations.
+            logger.error(f"Error optimizing stage {stage}: {str(e)}")
+
+    async def _handle_case_failure(self, case: Dict[str, Any], error: str) -> None:
+        """Handle a case processing failure.
         
         Args:
-            bottlenecks: List of identified bottlenecks
-            recommendations: Dictionary containing detailed recommendations
-        """
-        try:
-            message = ["🔄 Workflow Optimization Recommendations:", "", "Bottlenecks Identified:"]
-            
-            for bottleneck in bottlenecks:
-                message.append(f"- {bottleneck}")
-                
-            message.extend(["", "Recommendations:"])
-            for rec in recommendations.get('recommendations', []):
-                rec_line = f"- [{rec.get('priority', 'MEDIUM').upper()}] {rec.get('description', 'No description')}"
-                if rec.get('expected_impact'):
-                    rec_line += f" (Expected Impact: {rec['expected_impact']})"
-                message.append(rec_line)
-                
-            if recommendations.get('summary'):
-                message.extend(["", f"Summary: {recommendations['summary']}"])
-            
-            await self.slack_notifier.send_message("\n".join(message))
-            
-        except Exception as e:
-            logger.error(f"Error sending optimization recommendations: {str(e)}")
-    
-    async def _notify_agent_failure(
-        self, 
-        agent_name: str, 
-        error: str, 
-        recovery_strategy: Dict[str, Any]
-    ) -> None:
-        """Notify about agent failures.
-        
-        Args:
-            agent_name: Name of the failed agent
+            case: Failed case data
             error: Error message
-            recovery_strategy: Dictionary containing recovery recommendations
         """
         try:
-            message = [
-                "⚠️ Agent Failure Alert",
-                "",
-                f"Agent: {agent_name}",
-                f"Error: {error}",
-                "",
-                "Recovery Strategy:",
-                recovery_strategy.get('recommendation', 'No recovery strategy available')
-            ]
+            case_id = case.get('external_id', 'unknown')
             
-            await self.slack_notifier.notify_high_priority_case(
-                case_data={'title': f'Agent Failure: {agent_name}'},
-                analysis_data={
-                    'severity_score': 8, 
-                    'priority_score': 9, 
-                    'key_indicators': [error]
-                }
+            # Update case status
+            await self.supabase.table('cases').update({
+                'status': 'failed',
+                'error_message': error,
+                'modified_at': datetime.now().isoformat()
+            }).eq('external_id', case_id).execute()
+            
+            # Send notification
+            await self.slack_notifier.send_alert(
+                f"Case {case_id} processing failed: {error}",
+                severity="error"
             )
             
         except Exception as e:
-            logger.error(f"Error notifying agent failure: {str(e)}")
-    
-    async def _notify_stuck_workflow(
-        self, 
-        workflow_id: str, 
-        current_stage: str, 
-        analysis: Dict[str, Any]
-    ) -> None:
-        """Notify about stuck workflows.
+            logger.error(f"Error handling case failure: {str(e)}")
+
+    def _handle_shutdown(self, signum: int, frame: Any) -> None:
+        """Handle shutdown signal.
         
         Args:
-            workflow_id: ID of the stuck workflow
-            current_stage: Current stage where the workflow is stuck
-            analysis: Dictionary containing workflow analysis
+            signum: Signal number
+            frame: Current stack frame
         """
-        try:
-            message = [
-                "⚠️ Stuck Workflow Alert",
-                "",
-                f"Workflow ID: {workflow_id}",
-                f"Current Stage: {current_stage}",
-                "",
-                "Analysis:",
-                analysis.get('diagnosis', 'No diagnosis available'),
-                "",
-                "Recommended Action:",
-                analysis.get('recommendation', 'No recommendation available')
-            ]
-            
-            await self.slack_notifier.notify_high_priority_case(
-                case_data={'title': f'Stuck Workflow: {workflow_id}'},
-                analysis_data={
-                    'severity_score': 7, 
-                    'priority_score': 8, 
-                    'key_indicators': [current_stage]
-                }
-            )
-            
-        except Exception as e:
-            logger.error(f"Error notifying stuck workflow: {str(e)}")
+        logger.info(f"Received shutdown signal {signum}")
+        self._shutdown_event.set()

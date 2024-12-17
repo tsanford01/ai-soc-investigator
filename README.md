@@ -1,517 +1,160 @@
 # Security Case Investigation Agent System
 
-This system implements an automated case investigation workflow that monitors security cases, performs analysis, and escalates cases requiring human attention to Slack.
+This system implements an automated case investigation workflow that monitors security cases, performs analysis using AI, and manages case escalations. It uses a multi-agent architecture to handle different aspects of case processing and decision making.
 
 ## Components
 
-- **Case Selection Agent**: Identifies and prioritizes cases that need investigation
-- **Investigation Agent**: Analyzes case details, alerts, and kill chain information
-- **Notification Agent**: Handles Slack notifications for cases requiring human attention
-- **Coordinator Agent**: Orchestrates the workflow and optimizes performance of all agents
-- **AI Agent**: Provides intelligent analysis and optimization recommendations
-- **Slack Notifier**: Handles structured message delivery to Slack
+### Core Agents
+- **AI Agent**: Provides intelligent case analysis using OpenAI's GPT models
+- **Decision Agent**: Makes automated decisions based on case analysis and metrics
+- **Case Selection Agent**: Identifies and prioritizes cases for investigation
+- **Investigation Agent**: Performs detailed case analysis and evidence collection
+- **Notification Agent**: Handles external notifications and alerts
+- **Coordinator Agent**: Orchestrates the workflow between all agents
 
-## Architecture
+### Supporting Components
+- **API Client**: Handles external API communications
+- **Supabase Client**: Manages database operations and persistence
+- **Authentication**: Handles API and database authentication
 
-### Coordinator Agent
+## Database Schema
 
-The Coordinator Agent is the central orchestrator that:
-
-1. **Workflow Management**
-   - Initiates and tracks incident response workflows
-   - Monitors workflow progress and handles stuck workflows
-   - Maintains workflow state and performance metrics
-
-2. **Performance Optimization**
-   - Tracks success rates and execution times for each stage
-   - Identifies bottlenecks and performance issues
-   - Generates optimization recommendations using AI
-   - Implements automatic recovery strategies
-
-3. **Error Handling**
-   - Manages agent failures with graceful degradation
-   - Implements exponential backoff for retries
-   - Provides detailed error tracking and reporting
-   - Maintains audit logs for all failures
-
-4. **Metrics & Monitoring**
-   - Tracks performance metrics for all workflow stages
-   - Monitors agent health and status
-   - Provides real-time performance insights
-   - Generates optimization recommendations
-
-## Setup
-
-1. Install dependencies:
-```bash
-pip install -r requirements.txt
+### Cases Table
+```sql
+- id (UUID): Primary key
+- external_id (TEXT): Unique identifier from external system
+- title (TEXT): Case title
+- severity (TEXT): Case severity level
+- status (TEXT): Current case status
+- summary (TEXT): Case description
+- metadata (JSONB): Additional case metadata
+- score (INTEGER): Case priority score
+- size (INTEGER): Case size metric
+- tenant_name (TEXT): Organization identifier
+- closed (INTEGER): Case closure status
+- acknowledged (INTEGER): Case acknowledgment status
+- created_at (TIMESTAMPTZ): Creation timestamp
+- modified_at (TIMESTAMPTZ): Last modification timestamp
 ```
 
-2. Create a `.env` file with your configuration:
-```env
-# API Configuration
-API_TOKEN=your_api_token
-ENVIRONMENT_URL=your_api_url
-
-# Database Configuration
-SUPABASE_URL=your_supabase_url
-SUPABASE_KEY=your_supabase_key
-
-# Slack Configuration
-SLACK_TOKEN=your_slack_token
-SLACK_CHANNEL=#your-channel
-
-# OpenAI Configuration
-OPENAI_API_KEY=your_openai_key
-
-# Performance Thresholds
-EXECUTION_TIME_THRESHOLD=30
-SUCCESS_RATE_THRESHOLD=0.95
-ERROR_THRESHOLD=3
+### Decision Metrics Table
+```sql
+- id (UUID): Primary key
+- case_id (TEXT): Reference to case
+- decision_type (TEXT): Type of decision made
+- decision_value (JSONB): Decision details
+- confidence (FLOAT): Confidence score
+- risk_level (TEXT): Assessed risk level
+- priority (INTEGER): Priority level
+- needs_investigation (BOOLEAN): Investigation flag
+- automated_actions (JSONB): List of automated actions
+- required_human_actions (JSONB): Required manual actions
+- model (TEXT): AI model used
+- prompt (TEXT): Analysis prompt
+- completion (TEXT): AI response
+- created_at (TIMESTAMPTZ): Creation timestamp
 ```
 
-3. Initialize the database:
-```bash
-psql -h your_host -d your_database -U your_user -f schema.sql
-```
+## Setup Instructions
 
-## Running the System
+1. **Clone the Repository**
+   ```bash
+   git clone <repository-url>
+   cd APIs
+   ```
 
-### Production Mode
+2. **Install Dependencies**
+   ```bash
+   # Install production dependencies
+   pip install -r requirements.txt
+   
+   # For development, also install
+   pip install -r requirements-dev.txt
+   ```
 
-Start the coordination agent in production mode:
-```bash
-python run_coordinator.py
-```
+3. **Environment Setup**
+   ```bash
+   # Copy the example environment file
+   cp setup_env.example.py setup_env.py
+   
+   # Edit setup_env.py with your credentials:
+   - OPENAI_API_KEY: Your OpenAI API key
+   - SUPABASE_URL: Your Supabase project URL
+   - SUPABASE_KEY: Your Supabase API key
+   ```
 
-### Test Mode
+4. **Database Setup**
+   ```bash
+   # Run the database migrations in your Supabase SQL editor:
+   1. Execute migrations/create_cases.sql
+   2. Execute migrations/create_decision_metrics.sql
+   ```
 
-Run the test suite with mock components:
-```bash
-python test_coordinator.py
-```
-
-## Monitoring & Alerts
-
-### Performance Monitoring
-
-The system tracks key metrics:
-- Success/failure rates per stage
-- Average execution time per stage
-- Error counts and types
-- Workflow completion rates
-
-### Slack Notifications
-
-The system sends structured notifications for:
-1. **High Priority Cases**
-   - Severity and priority scores
-   - Key risk indicators
-   - Direct links to case details
-
-2. **System Alerts**
-   - Agent failures and recovery attempts
-   - Stuck workflows and diagnosis
-   - Performance bottlenecks
-   - Optimization recommendations
-
-3. **Error Reports**
-   - Detailed error messages
-   - Context and stack traces
-   - Recovery attempts and status
-
-## Error Handling & Recovery
-
-The system implements a robust error handling strategy:
-
-1. **Graceful Degradation**
-   - Continues operation when components fail
-   - Implements fallback mechanisms
-   - Maintains partial functionality
-
-2. **Automatic Recovery**
-   - Implements exponential backoff
-   - Uses AI for recovery strategies
-   - Tracks error patterns
-
-3. **Resource Cleanup**
-   - Proper cleanup of failed workflows
-   - Management of system resources
-   - Prevention of resource leaks
+5. **Verify Setup**
+   ```bash
+   # Run the test suite
+   pytest tests/ -v
+   ```
 
 ## Development
 
-### Testing
-
-Run the test suite:
+### Running Tests
 ```bash
-python -m pytest tests/
+# Run all tests
+pytest
+
+# Run specific test file
+pytest tests/test_migrations.py
+
+# Run with coverage
+pytest --cov=src tests/
 ```
 
-The test suite includes:
-- Unit tests with mock components
-- Integration tests with Supabase
-- Performance tests
-- Error handling tests
-
-### Adding New Components
-
-1. Implement the component interface
-2. Add performance tracking
-3. Update the coordinator agent
-4. Add appropriate tests
-5. Update documentation
-
-## Troubleshooting
-
-Common issues and solutions:
-
-1. **Workflow Stuck**
-   - Check the workflow status in Supabase
-   - Review error logs
-   - Check agent status
-
-2. **Performance Issues**
-   - Review optimization recommendations
-   - Check resource usage
-   - Verify API rate limits
-
-3. **Database Issues**
-   - Verify connection settings
-   - Check table permissions
-   - Review migration status
-
-## Usage Examples
-
-### 1. Basic Workflow
-
-```python
-from coordinator_agent import CoordinatorAgent
-from api_client import APIClient
-from ai_agent import AIAgent
-from supabase_client import SupabaseWrapper
-
-# Initialize components
-api_client = APIClient()
-supabase = SupabaseWrapper()
-ai_agent = AIAgent()
-
-# Create coordinator
-coordinator = CoordinatorAgent(api_client, supabase, ai_agent)
-
-# Start a workflow with an alert
-alert_data = {
-    'id': 'ALERT-001',
-    'title': 'Suspicious Network Activity',
-    'severity': 'High',
-    'source_ip': '192.168.1.100',
-    'destination_ip': '203.0.113.100',
-    'timestamp': '2024-12-12T11:58:05-07:00'
-}
-
-# Start workflow and get ID
-workflow_id = await coordinator.start_workflow(alert_data)
-print(f"Started workflow: {workflow_id}")
-```
-
-### 2. Performance Monitoring
-
-```python
-# Get performance metrics
-performance = await coordinator.get_agent_performance()
-
-# Check specific agent metrics
-for agent, metrics in performance.items():
-    print(f"\nAgent: {agent}")
-    print(f"Success Rate: {metrics['success_rate']:.2%}")
-    print(f"Avg Execution Time: {metrics['avg_execution_time']:.2f}s")
-    print(f"Total Executions: {metrics['total_executions']}")
-    print(f"Current Status: {metrics['current_status']}")
-
-# Get optimization recommendations
-recommendations = await coordinator.optimize_workflow()
-if recommendations['status'] != 'optimal':
-    print("\nBottlenecks found:")
-    for bottleneck in recommendations['bottlenecks']:
-        print(f"- {bottleneck}")
-```
-
-### 3. Error Handling
-
-```python
-try:
-    # Start workflow with invalid data
-    workflow_id = await coordinator.start_workflow({})
-except ValueError as e:
-    print(f"Validation error: {e}")
-except RuntimeError as e:
-    print(f"Workflow error: {e}")
-
-# Monitor specific workflow
-try:
-    workflow = await coordinator.supabase.get_workflow(workflow_id)
-    if workflow['status'] == 'error':
-        print(f"Error: {workflow['error_message']}")
-except Exception as e:
-    print(f"Monitoring error: {e}")
-```
-
-## API Documentation
-
-### CoordinatorAgent
-
-#### Initialization
-```python
-def __init__(self, api_client: APIClient, supabase_client: SupabaseWrapper, ai_agent: AIAgent)
-```
-- **Parameters**:
-  - `api_client`: Client for making API calls
-  - `supabase_client`: Client for database operations
-  - `ai_agent`: AI agent for analysis and recommendations
-- **Raises**: ValueError if any client is None
-
-#### Workflow Management
-
-```python
-async def start_workflow(self, alert_data: Dict[str, Any]) -> str
-```
-- **Parameters**:
-  - `alert_data`: Dictionary containing alert information
-- **Returns**: Workflow ID
-- **Raises**: 
-  - ValueError if alert_data is invalid
-  - RuntimeError if workflow creation fails
-
-```python
-async def get_agent_performance(self) -> Dict[str, Dict[str, Union[float, int, str]]]
-```
-- **Returns**: Dictionary of performance metrics per agent
-- **Metrics Include**:
-  - success_rate: Percentage of successful executions
-  - avg_execution_time: Average execution time in seconds
-  - total_executions: Total number of executions
-  - current_status: Current agent status
-
-```python
-async def optimize_workflow(self) -> Dict[str, Any]
-```
-- **Returns**: Optimization recommendations and bottleneck information
-- **Response Format**:
-  ```python
-  {
-      'status': 'optimal' | 'bottleneck_detected',
-      'bottlenecks': List[str],
-      'recommendations': List[Dict[str, Any]],
-      'summary': str
-  }
-  ```
-
-### AIAgent
-
-```python
-def analyze_case(self, case_data: Dict[str, Any]) -> Dict[str, Any]
-```
-- **Parameters**:
-  - `case_data`: Case information to analyze
-- **Returns**: Analysis results including severity and recommendations
-
-```python
-def get_optimization_recommendations(self, metrics: Dict[str, Any]) -> Dict[str, Any]
-```
-- **Parameters**:
-  - `metrics`: Current performance metrics
-- **Returns**: Optimization recommendations
-
-### SlackNotifier
-
-```python
-async def send_message(self, message: str) -> None
-```
-- **Parameters**:
-  - `message`: Message to send to Slack
-- **Raises**: RuntimeError if sending fails
-
-```python
-async def notify_high_priority_case(self, case_data: Dict[str, Any], analysis_data: Dict[str, Any]) -> None
-```
-- **Parameters**:
-  - `case_data`: Case information
-  - `analysis_data`: Analysis results
-- **Raises**: RuntimeError if notification fails
-
-## Deployment Guide
-
-### Prerequisites
-
-1. **Infrastructure Requirements**:
-   - Python 3.9+
-   - PostgreSQL 13+
-   - Redis (optional, for caching)
-   - 2 CPU cores minimum
-   - 4GB RAM minimum
-   - 20GB disk space
-
-2. **External Services**:
-   - Supabase account
-   - OpenAI API access
-   - Slack workspace with bot permissions
-   - Stellar API access
-
-### Deployment Steps
-
-1. **System Preparation**:
-   ```bash
-   # Update system
-   sudo apt-get update
-   sudo apt-get upgrade
-
-   # Install dependencies
-   sudo apt-get install python3.9 python3.9-venv postgresql-13
-   ```
-
-2. **Application Setup**:
-   ```bash
-   # Create virtual environment
-   python3.9 -m venv venv
-   source venv/bin/activate
-
-   # Install dependencies
-   pip install -r requirements.txt
-
-   # Initialize database
-   psql -h localhost -U postgres -f schema.sql
-   ```
-
-3. **Configuration**:
-   ```bash
-   # Copy example env file
-   cp .env.example .env
-
-   # Edit configuration
-   nano .env
-
-   # Test configuration
-   python test_config.py
-   ```
-
-4. **Service Setup**:
-   ```bash
-   # Create service file
-   sudo nano /etc/systemd/system/coordinator.service
-
-   # Add service configuration
-   [Unit]
-   Description=Security Case Coordinator Agent
-   After=network.target
-
-   [Service]
-   User=coordinator
-   WorkingDirectory=/opt/coordinator
-   Environment=PYTHONPATH=/opt/coordinator
-   ExecStart=/opt/coordinator/venv/bin/python run_coordinator.py
-   Restart=always
-
-   [Install]
-   WantedBy=multi-user.target
-
-   # Enable and start service
-   sudo systemctl enable coordinator
-   sudo systemctl start coordinator
-   ```
-
-### Monitoring Setup
-
-1. **Logging**:
-   ```bash
-   # Create log directory
-   sudo mkdir /var/log/coordinator
-   sudo chown coordinator:coordinator /var/log/coordinator
-
-   # Configure logrotate
-   sudo nano /etc/logrotate.d/coordinator
-   ```
-
-2. **Metrics**:
-   ```bash
-   # Install Prometheus and Grafana
-   sudo apt-get install prometheus grafana
-
-   # Configure Prometheus
-   sudo nano /etc/prometheus/prometheus.yml
-   ```
-
-3. **Alerts**:
-   ```bash
-   # Configure alert rules
-   sudo nano /etc/prometheus/alerts.yml
-
-   # Set up Alertmanager
-   sudo nano /etc/alertmanager/alertmanager.yml
-   ```
-
-### Backup & Recovery
-
-1. **Database Backup**:
-   ```bash
-   # Create backup script
-   nano backup.sh
-
-   #!/bin/bash
-   pg_dump -h localhost -U postgres coordinator > /backup/coordinator_$(date +%Y%m%d).sql
-   ```
-
-2. **Application Backup**:
-   ```bash
-   # Backup configuration
-   cp .env /backup/env_$(date +%Y%m%d)
-   
-   # Backup logs
-   tar -czf /backup/logs_$(date +%Y%m%d).tar.gz /var/log/coordinator/
-   ```
-
-### Health Checks
-
-1. **Service Health**:
-   ```bash
-   # Check service status
-   systemctl status coordinator
-
-   # Check logs
-   journalctl -u coordinator -f
-   ```
-
-2. **Database Health**:
-   ```bash
-   # Check connections
-   psql -h localhost -U postgres -c "SELECT count(*) FROM pg_stat_activity;"
-
-   # Check table sizes
-   psql -h localhost -U postgres -c "\dt+"
-   ```
-
-### Scaling Considerations
-
-1. **Vertical Scaling**:
-   - Increase CPU/RAM based on metrics
-   - Monitor database connection pool
-   - Adjust Python garbage collection
-
-2. **Horizontal Scaling**:
-   - Deploy multiple coordinator instances
-   - Use load balancer
-   - Implement Redis for coordination
-
-3. **Database Scaling**:
-   - Regular vacuum and reindex
-   - Partition large tables
-   - Consider read replicas
+### Code Quality
+The project uses several tools for code quality:
+- `black` for code formatting
+- `flake8` for style guide enforcement
+- `mypy` for type checking
+- `pylint` for code analysis
+
+## Environment Variables
+
+Required environment variables:
+- `OPENAI_API_KEY`: API key for OpenAI GPT model access
+- `SUPABASE_URL`: URL for your Supabase project
+- `SUPABASE_KEY`: API key for Supabase access
+- `SLACK_BOT_TOKEN`: Token for Slack notifications (if enabled)
+- `EXECUTION_TIME_THRESHOLD`: Maximum execution time for agent tasks (default: 300)
+- `SUCCESS_RATE_THRESHOLD`: Required success rate for agent operations (default: 0.95)
+- `MAX_RETRIES`: Maximum number of retry attempts for failed operations (default: 3)
+- `RETRY_DELAY`: Delay between retry attempts in seconds (default: 5)
+
+## Error Handling
+
+The system implements robust error handling with:
+- Automatic retries for transient failures
+- Structured logging for all operations
+- Transaction support for database operations
+- Graceful degradation when services are unavailable
+- Detailed error reporting and notifications
+
+## Performance Optimization
+
+The system includes:
+- Async patterns for improved throughput
+- Connection pooling for database operations
+- Caching for frequently accessed data
+- Batch processing for bulk operations
+- Performance metrics tracking and reporting
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
-
-Please make sure to update tests as appropriate.
+1. Fork the repository
+2. Create a feature branch
+3. Make your changes
+4. Run the test suite
+5. Submit a pull request
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+See the LICENSE file for details.

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "api-tools"
+version = "0.1.0"
+description = "API Tools for Security Case Investigation"
+authors = [
+    { name = "Codeium", email = "support@codeium.com" }
+]
+readme = "README.md"
+requires-python = ">=3.8"
+dependencies = [
+    "aiohttp",
+    "pydantic",
+    "pydantic-settings",
+    "python-dotenv",
+    "requests",
+    "tenacity",
+    "supabase",
+    "slack-sdk"
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest",
+    "pytest-asyncio",
+    "pytest-mock",
+    "pytest-cov"
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = [
+  "."
+]
+asyncio_mode = "auto"
