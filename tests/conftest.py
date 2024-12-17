@@ -4,7 +4,7 @@ Pytest configuration and fixtures
 import pytest
 import asyncio
 from typing import Generator, AsyncGenerator
-from src.config.settings import Settings
+from src.config.settings import get_test_settings, Settings
 
 @pytest.fixture
 def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
@@ -16,15 +16,7 @@ def event_loop() -> Generator[asyncio.AbstractEventLoop, None, None]:
 @pytest.fixture
 def settings() -> Settings:
     """Provide test settings"""
-    return Settings(
-        API_BASE_URL="http://test.local",
-        API_KEY="test-key",
-        SUPABASE_URL="http://supabase.test",
-        SUPABASE_KEY="test-key",
-        SLACK_TOKEN="test-token",
-        SLACK_CHANNEL="test-channel",
-        OPENAI_API_KEY="test-key",
-    )
+    return get_test_settings()
 
 @pytest.fixture
 async def mock_agent_registry() -> AsyncGenerator:
