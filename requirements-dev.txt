@@ -11,3 +11,5 @@ sphinx>=7.1.2
 pre-commit>=3.3.3
 types-requests>=2.31.0
 types-urllib3>=1.26.25
+urllib3>=2.2.2 # not directly required, pinned by Snyk to avoid a vulnerability
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
